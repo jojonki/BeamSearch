@@ -1,22 +1,57 @@
 """RNN Beam Search example
 
-I refered the following.
+I refered the following code.
 https://github.com/budzianowski/PyTorch-Beam-Search-Decoding
 """
+import argparse
 from heapq import heappush, heappop
-import operator
+import math
+import os
+import random
+import time
 
+import spacy
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import torch.nn.functional as F
+from torchtext.datasets import TranslationDataset, Multi30k
+from torchtext.data import Field, BucketIterator
 
+
+# utils {{{
+def tokenize_de(text):
+    """
+    Tokenizes German text from a string into a list of strings (tokens) and reverses it
+    """
+    return [tok.text for tok in spacy_de.tokenizer(text)][::-1]
+
+def tokenize_en(text):
+    """
+    Tokenizes English text from a string into a list of strings (tokens)
+    """
+    return [tok.text for tok in spacy_en.tokenizer(text)]
+
+def init_weights(m):
+    for name, param in m.named_parameters():
+        nn.init.uniform_(param.data, -0.08, 0.08)
+
+def epoch_time(start_time, end_time):
+    elapsed_time = end_time - start_time
+    elapsed_mins = int(elapsed_time / 60)
+    elapsed_secs = int(elapsed_time - (elapsed_mins * 60))
+    return elapsed_mins, elapsed_secs
+# }}}
 
 # EncoderRNN {{{
 class EncoderRNN(nn.Module):
-    def __init__(self, embd_size, h_size, vocab_size):
+    def __init__(self, embd_size, h_size, v_size, n_layers, dropout):
         super(EncoderRNN, self).__init__()
-        self.embedding = nn.Embedding(vocab_size, embd_size)
-        self.rnn = nn.GRU(embd_size, h_size, batch_first=False)
+        self.h_size = h_size
+        self.v_size = v_size
+        self.n_layers = n_layers
+        self.embedding = nn.Embedding(v_size, embd_size)
+        self.rnn = nn.GRU(embd_size, h_size, num_layers=n_layers, dropout=dropout)
 
     def forward(self, x):
         # x: (L, bs, H)
@@ -28,21 +63,126 @@ class EncoderRNN(nn.Module):
 
 # DecoderRNN {{{
 class DecoderRNN(nn.Module):
-    def __init__(self, embd_size, h_size, vocab_size):
+    def __init__(self, embd_size, h_size, v_size, n_layers, dropout):
         super(DecoderRNN, self).__init__()
         self.h_size = h_size
-        self.embedding = nn.Embedding(vocab_size, embd_size)
-        self.rnn = nn.GRU(embd_size, h_size)
-        self.fout = nn.Linear(h_size, vocab_size)
+        self.v_size = v_size
+        self.n_layers = n_layers
+        self.embedding = nn.Embedding(v_size, embd_size)
+        self.rnn = nn.GRU(embd_size, h_size, num_layers=n_layers, dropout=dropout)
+        self.fout = nn.Linear(h_size, v_size)
 
     def forward(self, x, hidden):
-        # x: (T, bs), hiden: (bs, H)
+        # x: (bs), hiden: (1, bs, H)
+        x = x.unsqueeze(0) # (1, bs)
         embedded = self.embedding(x)  # (1, 1, E) = (T, bs, E)
         out, hidden = self.rnn(embedded, hidden) # (1, 1, H)=(T, bs, H), (1, bs, H)
 
         out = self.fout(out.squeeze(0)) # (bs, V)=(1,V)
         out =  F.log_softmax(out, dim=1)
         return out, hidden
+# }}}
+
+# Seq2Seq {{{
+class Seq2Seq(nn.Module):
+    def __init__(self, encoder, decoder):
+        super(Seq2Seq, self).__init__()
+
+        self.encoder = encoder
+        self.decoder = decoder
+
+        assert encoder.h_size == decoder.h_size, \
+            "Hidden dimensions of encoder and decoder must be equal!"
+        assert encoder.n_layers == decoder.n_layers, \
+            "Encoder and decoder must have equal number of layers!"
+
+    def forward(self, src, trg, teacher_forcing_ratio=0.5):
+        """
+        src = [src len, batch size]
+        trg = [trg len, batch size]
+        teacher_forcing_ratio is probability to use teacher forcing
+        e.g. if teacher_forcing_ratio is 0.75 we use ground-truth inputs 75% of the time
+        """
+
+        batch_size = trg.shape[1]
+        trg_len = trg.shape[0]
+        trg_v_size = self.decoder.v_size
+
+        #tensor to store decoder outputs
+        outputs = torch.zeros(trg_len, batch_size, trg_v_size).to(DEVICE) # (trg_len, bs, trg_vocab)
+
+        #last hidden state of the encoder is used as the initial hidden state of the decoder
+        _out, hidden = self.encoder(src) # (T, bs, H), (1, bs, H)
+
+        #first input to the decoder is the <sos> tokens
+        inp = trg[0, :] # (bs) # first token
+
+        for t in range(1, trg_len):
+            #insert input token embedding, previous hidden and previous cell states
+            #receive output tensor (predictions) and new hidden and cell states
+            # output: (bs, trg_vocab)
+            # hidden, cell: (2, bs, hid)
+            output, hidden = self.decoder(inp, hidden)
+
+            #place predictions in a tensor holding predictions for each token
+            outputs[t] = output
+
+            #get the highest predicted token from our predictions
+            top1 = output.argmax(1) # (bs)
+
+            teacher_force = random.random() < teacher_forcing_ratio
+            inp = trg[t] if teacher_force else top1
+
+        return outputs
+    # }}}
+
+# train {{{
+def train(model, itr, optimizer, criterion):
+    print('Start training')
+    model.train()
+    epoch_loss = 0
+    for batch in itr:
+        src = batch.src # (T, bs)
+        trg = batch.trg # (T, bs)
+
+        optimizer.zero_grad()
+
+        output = model(src, trg)
+
+        output_size = output.shape[-1]
+
+        output = output[1:].view(-1, output_size)
+        trg = trg[1:].view(-1)
+
+        loss = criterion(output, trg)
+        loss.backward()
+        optimizer.step()
+
+        epoch_loss += loss.item()
+
+    return epoch_loss / len(itr)
+# }}}
+
+# evaluate {{{
+def evaluate(model, itr, criterion):
+    model.eval()
+    epoch_loss = 0
+    with torch.no_grad():
+        for batch in itr:
+            src = batch.src
+            trg = batch.trg
+
+            output = model(src, trg, teacher_forcing_ratio=0)
+
+            output_dim = output.shape[-1]
+
+            output = output[1:].view(-1, output_dim)
+            trg = trg[1:].view(-1)
+
+            loss = criterion(output, trg)
+            epoch_loss += loss.item()
+
+    return epoch_loss / len(itr)
 # }}}
 
 # BeamSearchNode {{{
@@ -61,44 +201,50 @@ class BeamSearchNode(object):
 # }}}
 
 # beam search {{{
-def beam_search_decoding(decoder, enc_out, beam_width, n_best, max_dec_steps=1000):
+def beam_search_decoding(decoder,
+                         enc_last_h,
+                         beam_width,
+                         n_best,
+                         sos_token,
+                         eos_token,
+                         max_dec_steps=1000):
     """Beam Seach Decoding for RNN
 
     Args:
         decoder: An RNN decoder model
-        enc_output: A sequence of encoded input. (T, bs, H)
+        enc_last_h: A sequence of encoded input. (n_layers, bs, H)
         beam_width: Beam search width
         n_best: The number of output sequences for each input
 
     Returns:
-        res_sequences: Decoded N-best results. (bs, T)
+        n_best_list: Decoded N-best results. (bs, T)
     """
 
     assert beam_width >= n_best
 
-    res_sequences = []
-    bs = enc_out.shape[1]
+    n_best_list = []
+    bs = enc_last_h.shape[1]
 
     # Decoding goes sentence by sentence.
     # So this process is very slow compared to batch decoding process.
     for batch_id in range(bs):
         # Get last encoder hidden state
-        decoder_hidden = enc_out[-1][batch_id].unsqueeze(0).unsqueeze(0) # (T, bs, H) = (1, 1, H)
+        decoder_hidden = enc_last_h[:, batch_id].unsqueeze(1).contiguous() # (n_layers, 1, H)
 
         # Prepare first token for decoder
-        decoder_input = torch.tensor([SOS_token]).long().to(DEVICE).unsqueeze(0) # (T, bs) = (1, 1)
+        decoder_input = torch.tensor([sos_token]).long().to(DEVICE) # (1)
 
         # Number of sentence to generate
         end_nodes = []
 
-        # Starting node
+        # starting node
         node = BeamSearchNode(h=decoder_hidden, prev_node=None, wid=decoder_input, logp=0, length=1)
 
-        # Whole beam search node graph
+        # whole beam search node graph
         nodes = []
 
         # Start the queue
-        heappush(nodes, (-node.eval(), node))
+        heappush(nodes, (-node.eval(), id(node), node))
         n_dec_steps = 0
 
         # Start beam search
@@ -108,12 +254,12 @@ def beam_search_decoding(decoder, enc_out, beam_width, n_best, max_dec_steps=100
                 break
 
             # Fetch the best node
-            score, n = heappop(nodes)
+            score, _, n = heappop(nodes)
             decoder_input = n.wid
             decoder_hidden = n.h
 
-            if n.wid.item() == EOS_token and n.prev_node != None:
-                end_nodes.append((score, n))
+            if n.wid.item() == eos_token and n.prev_node != None:
+                end_nodes.append((score, id(n), n))
                 # If we reached maximum # of sentences required
                 if len(end_nodes) >= n_best:
                     break
@@ -128,7 +274,7 @@ def beam_search_decoding(decoder, enc_out, beam_width, n_best, max_dec_steps=100
             next_nodes = []
             # Then, register new top-k nodes
             for new_k in range(beam_width):
-                decoded_t = topk_indexes[0][new_k].view(1, -1) # (1, 1)
+                decoded_t = topk_indexes[0][new_k].view(1) # (1)
                 logp = topk_log_prob[0][new_k].item() # float log probability val
 
                 node = BeamSearchNode(h=decoder_hidden,
@@ -136,51 +282,144 @@ def beam_search_decoding(decoder, enc_out, beam_width, n_best, max_dec_steps=100
                                       wid=decoded_t,
                                       logp=n.logp+logp,
                                       length=n.length+1)
-                heappush(nodes, (-node.eval(), node))
+                heappush(nodes, (-node.eval(), id(node), node))
             n_dec_steps += beam_width
 
-        # If there are no end_nodes, retrieve best nodes (they are probably truncated)
+        # if there are no end_nodes, retrieve best nodes (they are probably truncated)
         if len(end_nodes) == 0:
             end_nodes = [heappop(nodes) for _ in range(beam_width)]
 
         # Construct sequences from end_nodes
-        for score, n in sorted(end_nodes, key=lambda x: x[0]):
+        n_best_seq_list = []
+        for score, _id, n in sorted(end_nodes, key=lambda x: x[0]):
             sequence = []
-            sequence.append(n.wid)
+            sequence.append(n.wid.item())
             # back trace from end node
             while n.prev_node is not None:
                 n = n.prev_node
-                sequence.append(n.wid)
+                sequence.append(n.wid.item())
             sequence = sequence[::-1] # reverse
 
-            res_sequences.append(sequence)
+            n_best_seq_list.append(sequence)
 
-    return res_sequences
+        n_best_list.append(n_best_seq_list)
+
+    return n_best_list
 # }}}
 
 
-SOS_token = 0
-EOS_token = 1
-MAX_LENGTH = 50
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+spacy_de = spacy.load('de')
+spacy_en = spacy.load('en')
 
 def main():
-    batch_size = 4
-    embd_size = 64
-    h_size = 128
-    vocab_size = 1000
-    beam_width = 5
-    n_best = 3
+    # ArgumentParser {{{
+    parser = argparse.ArgumentParser()
+    # hyper parameters
+    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--n_epochs', type=int, default=10)
+    parser.add_argument('--enc_embd_size', type=int, default=256)
+    parser.add_argument('--dec_embd_size', type=int, default=256)
+    parser.add_argument('--rnn_h_size', type=int, default=512)
+    parser.add_argument('--n_enc_layers', type=int, default=2)
+    parser.add_argument('--n_dec_layers', type=int, default=2)
+    parser.add_argument('--enc_dropout', type=float, default=0.5)
+    parser.add_argument('--dec_dropout', type=float, default=0.5)
+    # other parameters
+    parser.add_argument('--beam_width', type=int, default=20)
+    parser.add_argument('--n_best', type=int, default=9)
+    parser.add_argument('--export_dir', type=str, default='./ckpts/')
+    parser.add_argument('--model_name', type=str, default='s2s')
+    parser.add_argument('--model_path', type=str, default='')
+    parser.add_argument('--skip_train', action='store_true')
+    opts = parser.parse_args()
+    # }}}
 
-    x = torch.zeros(MAX_LENGTH, batch_size).long().to(DEVICE) # dummy input
+    SOS_token = '<SOS>'
+    EOS_token = '<EOS>'
+    SRC = Field(tokenize=tokenize_de,
+                init_token=SOS_token,
+                eos_token=EOS_token,
+                lower=True)
+    TRG = Field(tokenize=tokenize_en,
+                init_token=SOS_token,
+                eos_token=EOS_token,
+                lower=True)
+    train_data, valid_data, test_data = Multi30k.splits(exts=('.de', '.en'), fields=(SRC, TRG))
+    print(f'Number of training examples: {len(train_data.examples)}')
+    print(f'Number of validation examples: {len(valid_data.examples)}')
+    print(f'Number of testing examples: {len(test_data.examples)}')
 
-    encoder = EncoderRNN(embd_size, h_size, vocab_size).to(DEVICE)
-    out, _h = encoder(x) # (T, bs, H), (1, 16, H)
-    decoder = DecoderRNN(embd_size, h_size, vocab_size).to(DEVICE)
-    decoded_seqs = beam_search_decoding(decoder, out, beam_width=beam_width, n_best=n_best)
-    for seq in decoded_seqs:
-        print([x.item() for x in seq])
+    SRC.build_vocab(train_data, min_freq=2)
+    TRG.build_vocab(train_data, min_freq=2)
+    print(f'Unique tokens in source (de) vocabulary: {len(SRC.vocab)}')
+    print(f'Unique tokens in target (en) vocabulary: {len(TRG.vocab)}')
+
+    train_itr, valid_itr, test_itr =\
+            BucketIterator.splits(
+                (train_data, valid_data, test_data),
+                batch_size=opts.batch_size,
+                device=DEVICE)
+
+    enc_v_size = len(SRC.vocab)
+    dec_v_size = len(TRG.vocab)
+
+    encoder = EncoderRNN(opts.enc_embd_size, opts.rnn_h_size, enc_v_size, opts.n_enc_layers, opts.enc_dropout)
+    decoder = DecoderRNN(opts.dec_embd_size, opts.rnn_h_size, dec_v_size, opts.n_dec_layers, opts.dec_dropout)
+    model = Seq2Seq(encoder, decoder).to(DEVICE)
+
+    TRG_PAD_IDX = TRG.vocab.stoi[TRG.pad_token]
+
+    if opts.model_path != '':
+        model.load_state_dict(torch.load(opts.model_path))
+
+    if not opts.skip_train:
+        optimizer = optim.Adam(model.parameters())
+        criterion = nn.CrossEntropyLoss(ignore_index=TRG_PAD_IDX)
+        best_valid_loss = float('inf')
+        for epoch in range(opts.n_epochs):
+            start_time = time.time()
+
+            train_loss = train(model, train_itr, optimizer, criterion)
+            valid_loss = evaluate(model, valid_itr, criterion)
+
+            end_time = time.time()
+
+            epoch_mins, epoch_secs = epoch_time(start_time, end_time)
+
+            if valid_loss < best_valid_loss:
+                print('Update model!')
+                best_valid_loss = valid_loss
+                torch.save(model.state_dict(), os.path.join(opts.export_dir, f'{opts.model_name}-model.pt'))
+            else:
+                print('Model was not updated. Stop training')
+                break
+
+            print(f'Epoch: {epoch+1:02} | Time: {epoch_mins}m {epoch_secs}s')
+            print(f'\tTrain Loss: {train_loss:.3f} | Train PPL: {math.exp(train_loss):7.3f}')
+            print(f'\t Val. Loss: {valid_loss:.3f} |  Val. PPL: {math.exp(valid_loss):7.3f}')
+
+    TRG_SOS_IDX = TRG.vocab.stoi[TRG.init_token]
+    TRG_EOS_IDX = TRG.vocab.stoi[TRG.eos_token]
+    model.eval()
+    with torch.no_grad():
+        for batch_id, batch in enumerate(test_itr):
+            src = batch.src # (T, bs)
+            trg = batch.trg # (T, bs)
+
+            _out, h = model.encoder(src) # (T, bs, H), (n_layers, bs, H)
+            # decoded_seqs: (bs, T)
+            decoded_seqs = beam_search_decoding(decoder=model.decoder,
+                                                enc_last_h=h,
+                                                beam_width=opts.beam_width,
+                                                n_best=opts.n_best,
+                                                sos_token=TRG_SOS_IDX,
+                                                eos_token=TRG_EOS_IDX)
+
+            # print first example's N-best of this mini-batch
+            print(f'In: {" ".join(SRC.vocab.itos[idx] for idx in src[:, 0])}')
+            for rank, seq in enumerate(decoded_seqs[0]):
+                print(f'Out: Rank-{rank+1}: {" ".join([TRG.vocab.itos[idx] for idx in seq])}')
 
 
 if __name__ == '__main__':
