@@ -1,6 +1,6 @@
 """RNN Beam Search example
 
-I refered the following code.
+I refered the following code for Beam Search.
 https://github.com/budzianowski/PyTorch-Beam-Search-Decoding
 """
 import argparse
@@ -296,8 +296,7 @@ def beam_search_decoding(decoder,
         # Construct sequences from end_nodes
         n_best_seq_list = []
         for score, _id, n in sorted(end_nodes, key=lambda x: x[0]):
-            sequence = []
-            sequence.append(n.wid.item())
+            sequence = [n.wid.item()]
             # back trace from end node
             while n.prev_node is not None:
                 n = n.prev_node
@@ -313,12 +312,12 @@ def beam_search_decoding(decoder,
 
 # batch beam search {{{
 def batch_beam_search_decoding(decoder,
-                         enc_last_h,
-                         beam_width,
-                         n_best,
-                         sos_token,
-                         eos_token,
-                         max_dec_steps):
+                               enc_last_h,
+                               beam_width,
+                               n_best,
+                               sos_token,
+                               eos_token,
+                               max_dec_steps):
     """Batch Beam Seach Decoding for RNN
 
     Args:
@@ -419,7 +418,7 @@ def batch_beam_search_decoding(decoder,
 
         n_best_seq_list = []
         for score, _id, n in sorted(end_nodes_list[bid], key=lambda x: x[0]):
-            sequence = []
+            sequence = [n.wid.item()]
             while n.prev_node is not None:
                 n = n.prev_node
                 sequence.append(n.wid.item())
