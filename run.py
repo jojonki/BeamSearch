@@ -212,7 +212,7 @@ def beam_search_decoding(decoder,
                          n_best,
                          sos_token,
                          eos_token,
-                         max_dec_steps=1000000):
+                         max_dec_steps):
     """Beam Seach Decoding for RNN
 
     Args:
@@ -318,7 +318,7 @@ def batch_beam_search_decoding(decoder,
                          n_best,
                          sos_token,
                          eos_token,
-                         max_dec_steps=1000):
+                         max_dec_steps):
     """Batch Beam Seach Decoding for RNN
 
     Args:
@@ -357,10 +357,14 @@ def batch_beam_search_decoding(decoder,
     # Start beam search
     fin_nodes = set()
     history = [None for _ in range(bs)]
+    n_dec_steps_list = [0 for _ in range(bs)]
     while len(fin_nodes) < bs:
         # Fetch the best node
         decoder_input, decoder_hidden = [], []
         for bid in range(bs):
+            if bid not in fin_nodes and n_dec_steps_list[bid] > max_dec_steps:
+                fin_nodes.add(bid)
+
             if bid in fin_nodes:
                 score, n = history[bid] # dummy for data consistency
             else:
@@ -405,6 +409,7 @@ def batch_beam_search_decoding(decoder,
                                       logp=n.logp+logp,
                                       length=n.length+1)
                 heappush(nodes[bid], (-node.eval(), id(node), node))
+            n_dec_steps_list[bid] += beam_width
 
     # Construct sequences from end_nodes
     # if there are no end_nodes, retrieve best nodes (they are probably truncated)
@@ -446,8 +451,9 @@ def main():
     parser.add_argument('--enc_dropout', type=float, default=0.5)
     parser.add_argument('--dec_dropout', type=float, default=0.5)
     # other parameters
-    parser.add_argument('--beam_width', type=int, default=20)
-    parser.add_argument('--n_best', type=int, default=9)
+    parser.add_argument('--beam_width', type=int, default=10)
+    parser.add_argument('--n_best', type=int, default=5)
+    parser.add_argument('--max_dec_steps', type=int, default=1000)
     parser.add_argument('--export_dir', type=str, default='./ckpts/')
     parser.add_argument('--model_name', type=str, default='s2s')
     parser.add_argument('--model_path', type=str, default='')
@@ -536,7 +542,8 @@ def main():
                                                 beam_width=opts.beam_width,
                                                 n_best=opts.n_best,
                                                 sos_token=TRG_SOS_IDX,
-                                                eos_token=TRG_EOS_IDX)
+                                                eos_token=TRG_EOS_IDX,
+                                                max_dec_steps=opts.max_dec_steps)
             end_time = time.time()
             print(f'for loop beam search time: {end_time-start_time:.3f}')
             print_n_best(decoded_seqs[0], TRG.vocab.itos)
@@ -547,7 +554,8 @@ def main():
                                                       beam_width=opts.beam_width,
                                                       n_best=opts.n_best,
                                                       sos_token=TRG_SOS_IDX,
-                                                      eos_token=TRG_EOS_IDX)
+                                                      eos_token=TRG_EOS_IDX,
+                                                      max_dec_steps=opts.max_dec_steps)
             end_time = time.time()
             print(f'Batch beam search time: {end_time-start_time:.3f}')
             print_n_best(decoded_seqs[0], TRG.vocab.itos)
