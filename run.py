@@ -4,6 +4,7 @@ I refered the following code.
 https://github.com/budzianowski/PyTorch-Beam-Search-Decoding
 """
 import argparse
+import copy
 from heapq import heappush, heappop
 import math
 import os
@@ -41,6 +42,10 @@ def epoch_time(start_time, end_time):
     elapsed_mins = int(elapsed_time / 60)
     elapsed_secs = int(elapsed_time - (elapsed_mins * 60))
     return elapsed_mins, elapsed_secs
+
+def print_n_best(decoded_seq, itos):
+    for rank, seq in enumerate(decoded_seq):
+        print(f'Out: Rank-{rank+1}: {" ".join([itos[idx] for idx in seq])}')
 # }}}
 
 # EncoderRNN {{{
@@ -76,7 +81,7 @@ class DecoderRNN(nn.Module):
         # x: (bs), hiden: (1, bs, H)
         x = x.unsqueeze(0) # (1, bs)
         embedded = self.embedding(x)  # (1, 1, E) = (T, bs, E)
-        out, hidden = self.rnn(embedded, hidden) # (1, 1, H)=(T, bs, H), (1, bs, H)
+        out, hidden = self.rnn(embedded, hidden) # (T, bs, H), (0, bs, H)
 
         out = self.fout(out.squeeze(0)) # (bs, V)=(1,V)
         out =  F.log_softmax(out, dim=1)
@@ -207,7 +212,7 @@ def beam_search_decoding(decoder,
                          n_best,
                          sos_token,
                          eos_token,
-                         max_dec_steps=1000):
+                         max_dec_steps=1000000):
     """Beam Seach Decoding for RNN
 
     Args:
@@ -258,7 +263,7 @@ def beam_search_decoding(decoder,
             decoder_input = n.wid
             decoder_hidden = n.h
 
-            if n.wid.item() == eos_token and n.prev_node != None:
+            if n.wid.item() == eos_token and n.prev_node is not None:
                 end_nodes.append((score, id(n), n))
                 # If we reached maximum # of sentences required
                 if len(end_nodes) >= n_best:
@@ -271,7 +276,6 @@ def beam_search_decoding(decoder,
 
             # Get top-k from this decoded result
             topk_log_prob, topk_indexes = torch.topk(decoder_output, beam_width) # (1, bw), (1, bw)
-            next_nodes = []
             # Then, register new top-k nodes
             for new_k in range(beam_width):
                 decoded_t = topk_indexes[0][new_k].view(1) # (1)
@@ -303,6 +307,122 @@ def beam_search_decoding(decoder,
             n_best_seq_list.append(sequence)
 
         n_best_list.append(n_best_seq_list)
+
+    return n_best_list
+# }}}
+
+# batch beam search {{{
+def batch_beam_search_decoding(decoder,
+                         enc_last_h,
+                         beam_width,
+                         n_best,
+                         sos_token,
+                         eos_token,
+                         max_dec_steps=1000):
+    """Batch Beam Seach Decoding for RNN
+
+    Args:
+        decoder: An RNN decoder model
+        enc_last_h: A sequence of encoded input. (n_layers, bs, H)
+        beam_width: Beam search width
+        n_best: The number of output sequences for each input
+
+    Returns:
+        n_best_list: Decoded N-best results. (bs, T)
+    """
+
+    assert beam_width >= n_best
+
+    n_best_list = []
+    bs = enc_last_h.shape[1]
+
+    # Get last encoder hidden state
+    decoder_hidden = enc_last_h # (n_layers, bs, H)
+
+    # Prepare first token for decoder
+    decoder_input = torch.tensor([sos_token]).repeat(1, bs).long().to(DEVICE) # (1, bs)
+
+    # Number of sentence to generate
+    end_nodes_list = [[] for _ in range(bs)]
+
+    # whole beam search node graph
+    nodes = [[] for _ in range(bs)]
+
+    # Start the queue
+    for bid in range(bs):
+        # starting node
+        node = BeamSearchNode(h=decoder_hidden[:, bid], prev_node=None, wid=decoder_input[:, bid], logp=0, length=1)
+        heappush(nodes[bid], (-node.eval(), id(node), node))
+
+    # Start beam search
+    fin_nodes = set()
+    history = [None for _ in range(bs)]
+    while len(fin_nodes) < bs:
+        # Fetch the best node
+        decoder_input, decoder_hidden = [], []
+        for bid in range(bs):
+            if bid in fin_nodes:
+                score, n = history[bid] # dummy for data consistency
+            else:
+                score, _, n = heappop(nodes[bid])
+                if n.wid.item() == eos_token and n.prev_node is not None:
+                    end_nodes_list[bid].append((score, id(n), n))
+                    # If we reached maximum # of sentences required
+                    if len(end_nodes_list[bid]) >= n_best:
+                        fin_nodes.add(bid)
+                history[bid] = (score, n)
+            decoder_input.append(n.wid)
+            decoder_hidden.append(n.h)
+
+        decoder_input = torch.cat(decoder_input).to(DEVICE) # (bs)
+        decoder_hidden = torch.stack(decoder_hidden, 1).to(DEVICE) # (n_layers, bs, H)
+
+        # Decode for one step using decoder
+        decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden) # (bs, V), (n_layers, bs, H)
+
+        mask = torch.ones(bs, decoder_output.shape[-1]).long().to(DEVICE) # (bs, V)
+        # mask[10] = 2000
+        for fin_n in fin_nodes:
+            mask[fin_n] = 0
+        decoder_output *= mask
+
+        # Get top-k from this decoded result
+        topk_log_prob, topk_indexes = torch.topk(decoder_output, beam_width) # (bs, bw), (bs, bw)
+        # Then, register new top-k nodes
+        for bid in range(bs):
+            if bid in fin_nodes:
+                continue
+            score, n = history[bid]
+            if n.wid.item() == eos_token and n.prev_node is not None:
+                continue
+            for new_k in range(beam_width):
+                decoded_t = topk_indexes[bid][new_k].view(1) # (1)
+                logp = topk_log_prob[bid][new_k].item() # float log probability val
+
+                node = BeamSearchNode(h=decoder_hidden[:, bid],
+                                      prev_node=n,
+                                      wid=decoded_t,
+                                      logp=n.logp+logp,
+                                      length=n.length+1)
+                heappush(nodes[bid], (-node.eval(), id(node), node))
+
+    # Construct sequences from end_nodes
+    # if there are no end_nodes, retrieve best nodes (they are probably truncated)
+    for bid in range(bs):
+        if len(end_nodes_list[bid]) == 0:
+            end_nodes_list[bid] = [heappop(nodes[bid]) for _ in range(beam_width)]
+
+        n_best_seq_list = []
+        for score, _id, n in sorted(end_nodes_list[bid], key=lambda x: x[0]):
+            sequence = []
+            while n.prev_node is not None:
+                n = n.prev_node
+                sequence.append(n.wid.item())
+            sequence = sequence[::-1] # reverse
+
+            n_best_seq_list.append(sequence)
+
+        n_best_list.append(copy.copy(n_best_seq_list))
 
     return n_best_list
 # }}}
@@ -406,20 +526,31 @@ def main():
         for batch_id, batch in enumerate(test_itr):
             src = batch.src # (T, bs)
             trg = batch.trg # (T, bs)
+            print(f'In: {" ".join(SRC.vocab.itos[idx] for idx in src[:, 0])}')
 
             _out, h = model.encoder(src) # (T, bs, H), (n_layers, bs, H)
             # decoded_seqs: (bs, T)
+            start_time = time.time()
             decoded_seqs = beam_search_decoding(decoder=model.decoder,
                                                 enc_last_h=h,
                                                 beam_width=opts.beam_width,
                                                 n_best=opts.n_best,
                                                 sos_token=TRG_SOS_IDX,
                                                 eos_token=TRG_EOS_IDX)
+            end_time = time.time()
+            print(f'for loop beam search time: {end_time-start_time:.3f}')
+            print_n_best(decoded_seqs[0], TRG.vocab.itos)
 
-            # print first example's N-best of this mini-batch
-            print(f'In: {" ".join(SRC.vocab.itos[idx] for idx in src[:, 0])}')
-            for rank, seq in enumerate(decoded_seqs[0]):
-                print(f'Out: Rank-{rank+1}: {" ".join([TRG.vocab.itos[idx] for idx in seq])}')
+            start_time = time.time()
+            decoded_seqs = batch_beam_search_decoding(decoder=model.decoder,
+                                                      enc_last_h=h,
+                                                      beam_width=opts.beam_width,
+                                                      n_best=opts.n_best,
+                                                      sos_token=TRG_SOS_IDX,
+                                                      eos_token=TRG_EOS_IDX)
+            end_time = time.time()
+            print(f'Batch beam search time: {end_time-start_time:.3f}')
+            print_n_best(decoded_seqs[0], TRG.vocab.itos)
 
 
 if __name__ == '__main__':
