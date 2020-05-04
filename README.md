@@ -4,7 +4,7 @@ This is a sample code of beam search decoding for pytorch. `run.py` trains a tra
 There are two beam search implementations.
 - `beam_search_decoding` decodes sentence by sentence. Although this implementation is slow, this may help your understanding for its simplicity.
 
-- `batch_beam_search_decodingl` decodes sentences as a batch and faster than `beam_search_decoding` (see the execution time in the below log). I believe that current implementation is not reasonable since there are lot of `for loop` implementations and there are much space for batch processing.
+- `batch_beam_search_decoding` decodes sentences as a batch and faster than `beam_search_decoding` (see the execution time in the below log). I believe that current implementation is not reasonable since there are lot of `for loop` implementations and there are much space for batch processing.
 
 Both ouputs of two implementaions must be the same.
 
@@ -61,3 +61,6 @@ Out: Rank-3: <SOS> a man in a suit is sitting at a cafe . <EOS>
 Out: Rank-4: <SOS> a man in a suit sitting at a podium . <EOS>
 Out: Rank-5: <SOS> a man in a is sitting at a podium . <EOS>
 ```
+
+## References
+- https://github.com/budzianowski/PyTorch-Beam-Search-Decoding
