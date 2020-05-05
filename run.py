@@ -8,16 +8,16 @@ import copy
 from heapq import heappush, heappop
 import math
 import os
-import random
 import time
 
 import spacy
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-from torchtext.datasets import TranslationDataset, Multi30k
+from torchtext.datasets import Multi30k
 from torchtext.data import Field, BucketIterator
+
+from models import EncoderRNN, DecoderRNN, Seq2Seq
 
 
 # utils {{{
@@ -48,98 +48,6 @@ def print_n_best(decoded_seq, itos):
         print(f'Out: Rank-{rank+1}: {" ".join([itos[idx] for idx in seq])}')
 # }}}
 
-# EncoderRNN {{{
-class EncoderRNN(nn.Module):
-    def __init__(self, embd_size, h_size, v_size, n_layers, dropout):
-        super(EncoderRNN, self).__init__()
-        self.h_size = h_size
-        self.v_size = v_size
-        self.n_layers = n_layers
-        self.embedding = nn.Embedding(v_size, embd_size)
-        self.rnn = nn.GRU(embd_size, h_size, num_layers=n_layers, dropout=dropout)
-
-    def forward(self, x):
-        # x: (L, bs, H)
-        embedded = self.embedding(x) # (L, bs, E)
-        output, hidden = self.rnn(embedded) # (L, bs, H), (1, bs, H)
-
-        return output, hidden
-# }}}
-
-# DecoderRNN {{{
-class DecoderRNN(nn.Module):
-    def __init__(self, embd_size, h_size, v_size, n_layers, dropout):
-        super(DecoderRNN, self).__init__()
-        self.h_size = h_size
-        self.v_size = v_size
-        self.n_layers = n_layers
-        self.embedding = nn.Embedding(v_size, embd_size)
-        self.rnn = nn.GRU(embd_size, h_size, num_layers=n_layers, dropout=dropout)
-        self.fout = nn.Linear(h_size, v_size)
-
-    def forward(self, x, hidden):
-        # x: (bs), hiden: (1, bs, H)
-        x = x.unsqueeze(0) # (1, bs)
-        embedded = self.embedding(x)  # (1, 1, E) = (T, bs, E)
-        out, hidden = self.rnn(embedded, hidden) # (T, bs, H), (0, bs, H)
-
-        out = self.fout(out.squeeze(0)) # (bs, V)=(1,V)
-        out =  F.log_softmax(out, dim=1)
-        return out, hidden
-# }}}
-
-# Seq2Seq {{{
-class Seq2Seq(nn.Module):
-    def __init__(self, encoder, decoder):
-        super(Seq2Seq, self).__init__()
-
-        self.encoder = encoder
-        self.decoder = decoder
-
-        assert encoder.h_size == decoder.h_size, \
-            "Hidden dimensions of encoder and decoder must be equal!"
-        assert encoder.n_layers == decoder.n_layers, \
-            "Encoder and decoder must have equal number of layers!"
-
-    def forward(self, src, trg, teacher_forcing_ratio=0.5):
-        """
-        src = [src len, batch size]
-        trg = [trg len, batch size]
-        teacher_forcing_ratio is probability to use teacher forcing
-        e.g. if teacher_forcing_ratio is 0.75 we use ground-truth inputs 75% of the time
-        """
-
-        batch_size = trg.shape[1]
-        trg_len = trg.shape[0]
-        trg_v_size = self.decoder.v_size
-
-        #tensor to store decoder outputs
-        outputs = torch.zeros(trg_len, batch_size, trg_v_size).to(DEVICE) # (trg_len, bs, trg_vocab)
-
-        #last hidden state of the encoder is used as the initial hidden state of the decoder
-        _out, hidden = self.encoder(src) # (T, bs, H), (1, bs, H)
-
-        #first input to the decoder is the <sos> tokens
-        inp = trg[0, :] # (bs) # first token
-
-        for t in range(1, trg_len):
-            #insert input token embedding, previous hidden and previous cell states
-            #receive output tensor (predictions) and new hidden and cell states
-            # output: (bs, trg_vocab)
-            # hidden, cell: (2, bs, hid)
-            output, hidden = self.decoder(inp, hidden)
-
-            #place predictions in a tensor holding predictions for each token
-            outputs[t] = output
-
-            #get the highest predicted token from our predictions
-            top1 = output.argmax(1) # (bs)
-
-            teacher_force = random.random() < teacher_forcing_ratio
-            inp = trg[t] if teacher_force else top1
-
-        return outputs
-    # }}}
 
 # train {{{
 def train(model, itr, optimizer, criterion):
@@ -383,12 +291,6 @@ def batch_beam_search_decoding(decoder,
         # Decode for one step using decoder
         decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden) # (bs, V), (n_layers, bs, H)
 
-        mask = torch.ones(bs, decoder_output.shape[-1]).long().to(DEVICE) # (bs, V)
-        # mask[10] = 2000
-        for fin_n in fin_nodes:
-            mask[fin_n] = 0
-        decoder_output *= mask
-
         # Get top-k from this decoded result
         topk_log_prob, topk_indexes = torch.topk(decoder_output, beam_width) # (bs, bw), (bs, bw)
         # Then, register new top-k nodes
@@ -489,9 +391,9 @@ def main():
     enc_v_size = len(SRC.vocab)
     dec_v_size = len(TRG.vocab)
 
-    encoder = EncoderRNN(opts.enc_embd_size, opts.rnn_h_size, enc_v_size, opts.n_enc_layers, opts.enc_dropout)
-    decoder = DecoderRNN(opts.dec_embd_size, opts.rnn_h_size, dec_v_size, opts.n_dec_layers, opts.dec_dropout)
-    model = Seq2Seq(encoder, decoder).to(DEVICE)
+    encoder = EncoderRNN(opts.enc_embd_size, opts.rnn_h_size, enc_v_size, opts.n_enc_layers, opts.enc_dropout, DEVICE)
+    decoder = DecoderRNN(opts.dec_embd_size, opts.rnn_h_size, dec_v_size, opts.n_dec_layers, opts.dec_dropout, DEVICE)
+    model = Seq2Seq(encoder, decoder, DEVICE).to(DEVICE)
 
     TRG_PAD_IDX = TRG.vocab.stoi[TRG.pad_token]
 
