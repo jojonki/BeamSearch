@@ -7,16 +7,15 @@ import torch.nn.functional as F
 
 # EncoderRNN {{{
 class EncoderRNN(nn.Module):
-    def __init__(self, embd_size, enc_h_size, dec_h_size, v_size, n_layers, dropout, device):
+    def __init__(self, embd_size, enc_h_size, dec_h_size, v_size, device):
         super(EncoderRNN, self).__init__()
         self.enc_h_size = enc_h_size
         self.dec_h_size = dec_h_size
         self.v_size = v_size
-        self.n_layers = n_layers
         self.device = device
 
         self.embedding = nn.Embedding(v_size, embd_size)
-        self.rnn = nn.GRU(embd_size, enc_h_size, num_layers=n_layers, dropout=dropout, bidirectional=True)
+        self.rnn = nn.GRU(embd_size, enc_h_size, bidirectional=True)
         self.f_concat_h = nn.Linear(enc_h_size*2, dec_h_size)
 
     def forward(self, x):
@@ -54,26 +53,30 @@ class Attention(nn.Module):
 
 # DecoderRNN {{{
 class DecoderRNN(nn.Module):
-    def __init__(self, embd_size, dec_h_size, v_size, n_layers, device):
+    def __init__(self, embd_size, dec_h_size, v_size, device):
         super(DecoderRNN, self).__init__()
         self.dec_h_size = dec_h_size
         self.v_size = v_size
-        self.n_layers = n_layers
         self.device = device
 
         self.embedding = nn.Embedding(v_size, embd_size)
-        self.rnn = nn.GRU(embd_size, dec_h_size, num_layers=n_layers)
+        self.rnn = nn.GRU(embd_size, dec_h_size)
         self.fout = nn.Linear(dec_h_size, v_size)
 
     def forward(self, x, hidden, _enc_outs):
-        # x: (bs), hiden: (1, bs, H)
+        """
+        x: (bs)
+        hiden: (bs, H)
+        _enc_outs: only used for AttnDecoderRNN and not used here.
+        """
         x = x.unsqueeze(0) # (1, bs)
+        hidden = hidden.unsqueeze(0) # (1, H)
         embedded = self.embedding(x)  # (1, 1, E) = (T, bs, E)
-        out, hidden = self.rnn(embedded, hidden) # (T, bs, H), (0, bs, H)
+        out, hidden = self.rnn(embedded, hidden) # (T, bs, H), (1, bs, H)
 
         out = self.fout(out.squeeze(0)) # (bs, V)=(1,V)
         out =  F.log_softmax(out, dim=1)
-        return out, hidden
+        return out, hidden.squeeze(0) # (T, bs, H), (bs, H)
 # }}}
 
 # AttnDecoderRNN {{{
@@ -84,11 +87,10 @@ class AttnDecoderRNN(nn.Module):
         self.dec_h_size = dec_h_size
         self.v_size = v_size
         self.attn = attn
-        self.n_layers = 1 # for attention simplicity
         self.device = device
 
         self.embedding = nn.Embedding(v_size, embd_size)
-        self.rnn = nn.GRU((embd_size+enc_h_size*2), dec_h_size, num_layers=self.n_layers)
+        self.rnn = nn.GRU((embd_size+enc_h_size*2), dec_h_size)
         self.fout = nn.Linear(dec_h_size+enc_h_size*2+embd_size, v_size)
 
     def forward(self, x, dec_hidden, enc_outs):
@@ -127,8 +129,6 @@ class Seq2Seq(nn.Module):
 
         assert encoder.enc_h_size == decoder.dec_h_size, \
             "Hidden dimensions of encoder and decoder must be equal!"
-        assert encoder.n_layers == decoder.n_layers, \
-            "Encoder and decoder must have equal number of layers!"
 
     def forward(self, src, trg, teacher_forcing_ratio=0.5):
         """

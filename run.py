@@ -110,9 +110,6 @@ def main():
     parser.add_argument('--dec_embd_size', type=int, default=256)
     parser.add_argument('--enc_h_size', type=int, default=512)
     parser.add_argument('--dec_h_size', type=int, default=512)
-    parser.add_argument('--n_layers', type=int, default=2)
-    parser.add_argument('--enc_dropout', type=float, default=0.5)
-    parser.add_argument('--dec_dropout', type=float, default=0.5)
     # other parameters
     parser.add_argument('--beam_width', type=int, default=10)
     parser.add_argument('--n_best', type=int, default=5)
@@ -125,10 +122,6 @@ def main():
     opts = parser.parse_args()
     # }}}
 
-    if opts.attention:
-        if opts.n_layers != 1:
-            print('Currently, n_layers of attention model must be 1.')
-            opts.n_layers = 1
 
     SOS_token = '<SOS>'
     EOS_token = '<EOS>'
@@ -159,12 +152,12 @@ def main():
     enc_v_size = len(SRC.vocab)
     dec_v_size = len(TRG.vocab)
 
-    encoder = EncoderRNN(opts.enc_embd_size, opts.enc_h_size, opts.dec_h_size, enc_v_size, opts.n_layers, opts.enc_dropout, DEVICE)
+    encoder = EncoderRNN(opts.enc_embd_size, opts.enc_h_size, opts.dec_h_size, enc_v_size, DEVICE)
     if opts.attention:
         attn = Attention(opts.enc_h_size, opts.dec_h_size)
         decoder = AttnDecoderRNN(opts.dec_embd_size, opts.enc_h_size, opts.dec_h_size, dec_v_size, attn, DEVICE)
     else:
-        decoder = DecoderRNN(opts.dec_embd_size, opts.dec_h_size, dec_v_size, opts.n_layers,  DEVICE)
+        decoder = DecoderRNN(opts.dec_embd_size, opts.dec_h_size, dec_v_size,  DEVICE)
     model = Seq2Seq(encoder, decoder, DEVICE).to(DEVICE)
 
     TRG_PAD_IDX = TRG.vocab.stoi[TRG.pad_token]
@@ -187,9 +180,11 @@ def main():
             epoch_mins, epoch_secs = epoch_time(start_time, end_time)
 
             if valid_loss < best_valid_loss:
-                print('Update model!')
                 best_valid_loss = valid_loss
-                torch.save(model.state_dict(), os.path.join(opts.export_dir, f'{opts.model_name}-model.pt'))
+                attn_type = 'attn' if opts.attention else 'vanilla'
+                model_path = os.path.join(opts.export_dir, f'{opts.model_name}-{attn_type}.pt')
+                print(f'Update model! Saved {model_path}')
+                torch.save(model.state_dict(), model_path)
             else:
                 print('Model was not updated. Stop training')
                 break
@@ -207,7 +202,7 @@ def main():
             trg = batch.trg # (T, bs)
             print(f'In: {" ".join(SRC.vocab.itos[idx] for idx in src[:, 0])}')
 
-            enc_outs, h = model.encoder(src) # (T, bs, H), (n_layers, bs, H)
+            enc_outs, h = model.encoder(src) # (T, bs, H), (bs, H)
             # decoded_seqs: (bs, T)
             start_time = time.time()
             decoded_seqs = beam_search_decoding(decoder=model.decoder,
