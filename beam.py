@@ -13,10 +13,8 @@ class BeamSearchNode(object):
         self.logp = logp
         self.length = length
 
-    def eval(self, alpha=1.0):
-        reward = 0
-        # Add here a function for shaping a reward
-        return self.logp / float(self.length - 1 + 1e-6) + alpha * reward
+    def eval(self):
+        return self.logp / float(self.length - 1 + 1e-6)
 # }}}
 
 # beam search {{{
