@@ -7,36 +7,63 @@ import torch.nn.functional as F
 
 # EncoderRNN {{{
 class EncoderRNN(nn.Module):
-    def __init__(self, embd_size, h_size, v_size, n_layers, dropout, device):
+    def __init__(self, embd_size, enc_h_size, dec_h_size, v_size, n_layers, dropout, device):
         super(EncoderRNN, self).__init__()
-        self.h_size = h_size
+        self.enc_h_size = enc_h_size
+        self.dec_h_size = dec_h_size
         self.v_size = v_size
         self.n_layers = n_layers
         self.device = device
 
         self.embedding = nn.Embedding(v_size, embd_size)
-        self.rnn = nn.GRU(embd_size, h_size, num_layers=n_layers, dropout=dropout)
+        self.rnn = nn.GRU(embd_size, enc_h_size, num_layers=n_layers, dropout=dropout, bidirectional=True)
+        self.f_concat_h = nn.Linear(enc_h_size*2, dec_h_size)
 
     def forward(self, x):
-        # x: (L, bs, H)
-        embedded = self.embedding(x) # (L, bs, E)
-        output, hidden = self.rnn(embedded) # (L, bs, H), (1, bs, H)
+        # x: (T, bs, H)
+        embedded = self.embedding(x) # (T, bs, E)
+        output, hidden = self.rnn(embedded) # (T, bs, 2H), (2, bs, H)
+        hidden = torch.tanh(self.f_concat_h(torch.cat((hidden[-2], hidden[-1]), dim=1))) # (bs, H)
 
-        return output, hidden
+        return output, hidden.squeeze(0) # (T, bs, 2H), (bs, H)
+# }}}
+
+# Attention {{{
+class Attention(nn.Module):
+    def __init__(self, enc_h_size, dec_h_size):
+        super(Attention, self).__init__()
+        self.attn = nn.Linear((enc_h_size * 2) + dec_h_size, dec_h_size)
+        self.v = nn.Linear(dec_h_size, 1, bias=False)
+
+    def forward(self, dec_hidden, enc_outs):
+        """
+        dec_hidden: (bs, decH)
+        enc_outs: (T, bs, encH*2)
+        """
+        bs = enc_outs.shape[1]
+        src_len = enc_outs.shape[0]
+
+        dec_hidden = dec_hidden.unsqueeze(1).repeat(1, src_len, 1) # (bs, T, decH)
+        enc_outs = enc_outs.permute(1, 0, 2) # (bs, T, encH*2)
+
+        energy = torch.tanh(self.attn(torch.cat((dec_hidden, enc_outs), dim=2))) # (bs, T, encH*2+decH)
+        attention = self.v(energy).squeeze(2) # (bs, T)
+
+        return F.softmax(attention, dim=1)
 # }}}
 
 # DecoderRNN {{{
 class DecoderRNN(nn.Module):
-    def __init__(self, embd_size, h_size, v_size, n_layers, dropout, device):
+    def __init__(self, embd_size, dec_h_size, v_size, n_layers, device):
         super(DecoderRNN, self).__init__()
-        self.h_size = h_size
+        self.dec_h_size = dec_h_size
         self.v_size = v_size
         self.n_layers = n_layers
         self.device = device
 
         self.embedding = nn.Embedding(v_size, embd_size)
-        self.rnn = nn.GRU(embd_size, h_size, num_layers=n_layers, dropout=dropout)
-        self.fout = nn.Linear(h_size, v_size)
+        self.rnn = nn.GRU(embd_size, dec_h_size, num_layers=n_layers)
+        self.fout = nn.Linear(dec_h_size, v_size)
 
     def forward(self, x, hidden):
         # x: (bs), hiden: (1, bs, H)
@@ -49,6 +76,47 @@ class DecoderRNN(nn.Module):
         return out, hidden
 # }}}
 
+# AttnDecoderRNN {{{
+class AttnDecoderRNN(nn.Module):
+    def __init__(self, embd_size, enc_h_size, dec_h_size, v_size, attn, device):
+        super(AttnDecoderRNN, self).__init__()
+        self.enc_h_size = enc_h_size
+        self.dec_h_size = dec_h_size
+        self.v_size = v_size
+        self.attn = attn
+        self.n_layers = 1 # for attention simplicity
+        self.device = device
+
+        self.embedding = nn.Embedding(v_size, embd_size)
+        self.rnn = nn.GRU((embd_size+enc_h_size*2), dec_h_size, num_layers=self.n_layers)
+        self.fout = nn.Linear(dec_h_size+enc_h_size*2+embd_size, v_size)
+
+    def forward(self, x, dec_hidden, enc_outs):
+        """
+        x: (bs),
+        dec_hidden: (bs, decH)
+        enc_outs: (T, bs, encH*2)
+        """
+        x = x.unsqueeze(0) # (1, bs)
+        embedded = self.embedding(x) # (1, bs, E)
+        a = self.attn(dec_hidden, enc_outs).unsqueeze(1) # (bs, 1, T)
+        enc_outs = enc_outs.permute(1, 0, 2) # (bs, T, encH*2)
+        weighted = torch.bmm(a, enc_outs) # (bs, 1, encH*2)
+        weighted = weighted.permute(1, 0, 2) # (1, bs, encH*2)
+        rnn_input = torch.cat((embedded, weighted), dim=2) # (1, bs, E+encH*2)
+
+        out, dec_hidden = self.rnn(rnn_input, dec_hidden.unsqueeze(0)) # (1, bs, H), (1, bs, H)
+        # seq_len, n_layers and n_directions will always be 1 in this decoder, therefore:
+        assert (out == dec_hidden).all()
+
+        embedded = embedded.squeeze(0) # (bs, E)
+        out = out.squeeze(0) # (bs, H)
+        weighted = weighted.squeeze(0) # (bs, encH*2)
+        pred = self.fout(torch.cat((out, weighted, embedded), dim=1)) # (bs, V)
+
+        return pred, dec_hidden.squeeze(0) # (bs, V), (bs, H)
+# }}}
+
 # Seq2Seq {{{
 class Seq2Seq(nn.Module):
     def __init__(self, encoder, decoder, device):
@@ -57,7 +125,7 @@ class Seq2Seq(nn.Module):
         self.decoder = decoder
         self.device = device
 
-        assert encoder.h_size == decoder.h_size, \
+        assert encoder.enc_h_size == decoder.dec_h_size, \
             "Hidden dimensions of encoder and decoder must be equal!"
         assert encoder.n_layers == decoder.n_layers, \
             "Encoder and decoder must have equal number of layers!"
@@ -78,7 +146,7 @@ class Seq2Seq(nn.Module):
         outputs = torch.zeros(trg_len, batch_size, trg_v_size).to(self.device) # (trg_len, bs, trg_vocab)
 
         #last hidden state of the encoder is used as the initial hidden state of the decoder
-        _out, hidden = self.encoder(src) # (T, bs, H), (1, bs, H)
+        enc_outs, hidden = self.encoder(src) # (T, bs, encH*), (bs, H)
 
         #first input to the decoder is the <sos> tokens
         inp = trg[0, :] # (bs) # first token
@@ -88,7 +156,7 @@ class Seq2Seq(nn.Module):
             #receive output tensor (predictions) and new hidden and cell states
             # output: (bs, trg_vocab)
             # hidden, cell: (2, bs, hid)
-            output, hidden = self.decoder(inp, hidden)
+            output, hidden = self.decoder(inp, hidden, enc_outs)
 
             #place predictions in a tensor holding predictions for each token
             outputs[t] = output

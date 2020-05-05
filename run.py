@@ -16,7 +16,7 @@ from torchtext.datasets import Multi30k
 from torchtext.data import Field, BucketIterator
 
 from beam import beam_search_decoding, batch_beam_search_decoding
-from models import EncoderRNN, DecoderRNN, Seq2Seq
+from models import EncoderRNN, DecoderRNN, Attention, AttnDecoderRNN, Seq2Seq
 
 
 # utils {{{
@@ -108,9 +108,9 @@ def main():
     parser.add_argument('--n_epochs', type=int, default=10)
     parser.add_argument('--enc_embd_size', type=int, default=256)
     parser.add_argument('--dec_embd_size', type=int, default=256)
-    parser.add_argument('--rnn_h_size', type=int, default=512)
-    parser.add_argument('--n_enc_layers', type=int, default=2)
-    parser.add_argument('--n_dec_layers', type=int, default=2)
+    parser.add_argument('--enc_h_size', type=int, default=512)
+    parser.add_argument('--dec_h_size', type=int, default=512)
+    parser.add_argument('--n_layers', type=int, default=2)
     parser.add_argument('--enc_dropout', type=float, default=0.5)
     parser.add_argument('--dec_dropout', type=float, default=0.5)
     # other parameters
@@ -121,6 +121,7 @@ def main():
     parser.add_argument('--model_name', type=str, default='s2s')
     parser.add_argument('--model_path', type=str, default='')
     parser.add_argument('--skip_train', action='store_true')
+    parser.add_argument('--attention', action='store_true')
     opts = parser.parse_args()
     # }}}
 
@@ -153,8 +154,12 @@ def main():
     enc_v_size = len(SRC.vocab)
     dec_v_size = len(TRG.vocab)
 
-    encoder = EncoderRNN(opts.enc_embd_size, opts.rnn_h_size, enc_v_size, opts.n_enc_layers, opts.enc_dropout, DEVICE)
-    decoder = DecoderRNN(opts.dec_embd_size, opts.rnn_h_size, dec_v_size, opts.n_dec_layers, opts.dec_dropout, DEVICE)
+    encoder = EncoderRNN(opts.enc_embd_size, opts.enc_h_size, opts.dec_h_size, enc_v_size, opts.n_layers, opts.enc_dropout, DEVICE)
+    if opts.attention:
+        attn = Attention(opts.enc_h_size, opts.dec_h_size)
+        decoder = AttnDecoderRNN(opts.dec_embd_size, opts.enc_h_size, opts.dec_h_size, dec_v_size, attn, DEVICE)
+    else:
+        decoder = DecoderRNN(opts.dec_embd_size, opts.dec_h_size, dec_v_size, opts.n_layers,  DEVICE)
     model = Seq2Seq(encoder, decoder, DEVICE).to(DEVICE)
 
     TRG_PAD_IDX = TRG.vocab.stoi[TRG.pad_token]
