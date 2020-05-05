@@ -1,4 +1,4 @@
-# BeamSearch
+# Seq2Seq Beam Search Decoding for Pytorch
 This is a sample code of beam search decoding for pytorch. `run.py` trains a translation model (de -> en). 
 
 There are two beam search implementations.
@@ -72,4 +72,5 @@ Out: Rank-2: <SOS> a man in a suit sits at a bus stop . <EOS>
 ```
 
 ## References
+- [C5W3L08 Attention Model, Andrew Ng.](https://www.youtube.com/watch?v=quoGRI-1l0A&list=LLJENudvIT4mHIwNFAMlX29Q&index=2&t=0s)
 - https://github.com/budzianowski/PyTorch-Beam-Search-Decoding
