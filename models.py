@@ -65,7 +65,7 @@ class DecoderRNN(nn.Module):
         self.rnn = nn.GRU(embd_size, dec_h_size, num_layers=n_layers)
         self.fout = nn.Linear(dec_h_size, v_size)
 
-    def forward(self, x, hidden):
+    def forward(self, x, hidden, _enc_outs):
         # x: (bs), hiden: (1, bs, H)
         x = x.unsqueeze(0) # (1, bs)
         embedded = self.embedding(x)  # (1, 1, E) = (T, bs, E)
@@ -152,11 +152,7 @@ class Seq2Seq(nn.Module):
         inp = trg[0, :] # (bs) # first token
 
         for t in range(1, trg_len):
-            #insert input token embedding, previous hidden and previous cell states
-            #receive output tensor (predictions) and new hidden and cell states
-            # output: (bs, trg_vocab)
-            # hidden, cell: (2, bs, hid)
-            output, hidden = self.decoder(inp, hidden, enc_outs)
+            output, hidden = self.decoder(inp, hidden, enc_outs) # (bs, V), (bs, H)
 
             #place predictions in a tensor holding predictions for each token
             outputs[t] = output

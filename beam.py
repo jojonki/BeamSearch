@@ -21,6 +21,7 @@ class BeamSearchNode(object):
 
 # beam search {{{
 def beam_search_decoding(decoder,
+                         enc_outs,
                          enc_last_h,
                          beam_width,
                          n_best,
@@ -32,7 +33,8 @@ def beam_search_decoding(decoder,
 
     Args:
         decoder: An RNN decoder model
-        enc_last_h: A sequence of encoded input. (n_layers, bs, H)
+        enc_outs: A sequence of encoded input. (T, bs, 2H). 2H for bidirectional
+        enc_last_h: (bs, H)
         beam_width: Beam search width
         n_best: The number of output sequences for each input
 
@@ -43,13 +45,14 @@ def beam_search_decoding(decoder,
     assert beam_width >= n_best
 
     n_best_list = []
-    bs = enc_last_h.shape[1]
+    bs = enc_outs.shape[1]
 
     # Decoding goes sentence by sentence.
     # So this process is very slow compared to batch decoding process.
     for batch_id in range(bs):
         # Get last encoder hidden state
-        decoder_hidden = enc_last_h[:, batch_id].unsqueeze(1).contiguous() # (n_layers, 1, H)
+        decoder_hidden = enc_last_h[batch_id] # (H)
+        enc_out = enc_outs[:, batch_id].unsqueeze(1) # (T, 1, 2H)
 
         # Prepare first token for decoder
         decoder_input = torch.tensor([sos_token]).long().to(device) # (1)
@@ -87,7 +90,7 @@ def beam_search_decoding(decoder,
                     continue
 
             # Decode for one step using decoder
-            decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden)
+            decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden.unsqueeze(0), enc_out)
 
             # Get top-k from this decoded result
             topk_log_prob, topk_indexes = torch.topk(decoder_output, beam_width) # (1, bw), (1, bw)
@@ -96,7 +99,7 @@ def beam_search_decoding(decoder,
                 decoded_t = topk_indexes[0][new_k].view(1) # (1)
                 logp = topk_log_prob[0][new_k].item() # float log probability val
 
-                node = BeamSearchNode(h=decoder_hidden,
+                node = BeamSearchNode(h=decoder_hidden.squeeze(0),
                                       prev_node=n,
                                       wid=decoded_t,
                                       logp=n.logp+logp,
@@ -127,6 +130,7 @@ def beam_search_decoding(decoder,
 
 # batch beam search {{{
 def batch_beam_search_decoding(decoder,
+                               enc_outs,
                                enc_last_h,
                                beam_width,
                                n_best,
@@ -138,7 +142,8 @@ def batch_beam_search_decoding(decoder,
 
     Args:
         decoder: An RNN decoder model
-        enc_last_h: A sequence of encoded input. (n_layers, bs, H)
+        enc_outs: A sequence of encoded input. (T, bs, 2H). 2H for bidirectional
+        enc_last_h: (bs, H)
         beam_width: Beam search width
         n_best: The number of output sequences for each input
 
@@ -149,10 +154,10 @@ def batch_beam_search_decoding(decoder,
     assert beam_width >= n_best
 
     n_best_list = []
-    bs = enc_last_h.shape[1]
+    bs = enc_last_h.shape[0]
 
     # Get last encoder hidden state
-    decoder_hidden = enc_last_h # (n_layers, bs, H)
+    decoder_hidden = enc_last_h # (bs, H)
 
     # Prepare first token for decoder
     decoder_input = torch.tensor([sos_token]).repeat(1, bs).long().to(device) # (1, bs)
@@ -166,7 +171,7 @@ def batch_beam_search_decoding(decoder,
     # Start the queue
     for bid in range(bs):
         # starting node
-        node = BeamSearchNode(h=decoder_hidden[:, bid], prev_node=None, wid=decoder_input[:, bid], logp=0, length=1)
+        node = BeamSearchNode(h=decoder_hidden[bid], prev_node=None, wid=decoder_input[:, bid], logp=0, length=1)
         heappush(nodes[bid], (-node.eval(), id(node), node))
 
     # Start beam search
@@ -194,10 +199,10 @@ def batch_beam_search_decoding(decoder,
             decoder_hidden.append(n.h)
 
         decoder_input = torch.cat(decoder_input).to(device) # (bs)
-        decoder_hidden = torch.stack(decoder_hidden, 1).to(device) # (n_layers, bs, H)
+        decoder_hidden = torch.stack(decoder_hidden, 0).to(device) # (bs, H)
 
         # Decode for one step using decoder
-        decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden) # (bs, V), (n_layers, bs, H)
+        decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden, enc_outs) # (bs, V), (bs, H)
 
         # Get top-k from this decoded result
         topk_log_prob, topk_indexes = torch.topk(decoder_output, beam_width) # (bs, bw), (bs, bw)
@@ -212,7 +217,7 @@ def batch_beam_search_decoding(decoder,
                 decoded_t = topk_indexes[bid][new_k].view(1) # (1)
                 logp = topk_log_prob[bid][new_k].item() # float log probability val
 
-                node = BeamSearchNode(h=decoder_hidden[:, bid],
+                node = BeamSearchNode(h=decoder_hidden[bid],
                                       prev_node=n,
                                       wid=decoded_t,
                                       logp=n.logp+logp,

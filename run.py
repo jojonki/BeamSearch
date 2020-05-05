@@ -125,6 +125,11 @@ def main():
     opts = parser.parse_args()
     # }}}
 
+    if opts.attention:
+        if opts.n_layers != 1:
+            print('Currently, n_layers of attention model must be 1.')
+            opts.n_layers = 1
+
     SOS_token = '<SOS>'
     EOS_token = '<EOS>'
     SRC = Field(tokenize=tokenize_de,
@@ -202,10 +207,11 @@ def main():
             trg = batch.trg # (T, bs)
             print(f'In: {" ".join(SRC.vocab.itos[idx] for idx in src[:, 0])}')
 
-            _out, h = model.encoder(src) # (T, bs, H), (n_layers, bs, H)
+            enc_outs, h = model.encoder(src) # (T, bs, H), (n_layers, bs, H)
             # decoded_seqs: (bs, T)
             start_time = time.time()
             decoded_seqs = beam_search_decoding(decoder=model.decoder,
+                                                enc_outs=enc_outs,
                                                 enc_last_h=h,
                                                 beam_width=opts.beam_width,
                                                 n_best=opts.n_best,
@@ -219,6 +225,7 @@ def main():
 
             start_time = time.time()
             decoded_seqs = batch_beam_search_decoding(decoder=model.decoder,
+                                                      enc_outs=enc_outs,
                                                       enc_last_h=h,
                                                       beam_width=opts.beam_width,
                                                       n_best=opts.n_best,
