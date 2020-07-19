@@ -115,7 +115,7 @@ class AttnDecoderRNN(nn.Module):
         out = out.squeeze(0) # (bs, H)
         weighted = weighted.squeeze(0) # (bs, encH*2)
         pred = self.fout(torch.cat((out, weighted, embedded), dim=1)) # (bs, V)
-
+        pred = F.log_softmax(pred, dim=1) # ?
         return pred, dec_hidden.squeeze(0) # (bs, V), (bs, H)
 # }}}
 
